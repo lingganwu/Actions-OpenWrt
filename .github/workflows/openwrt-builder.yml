@@ -1,4 +1,4 @@
-name: AX6000 Passwall (Ultimate Fix)
+name: AX6000 Passwall (Auto Branch)
 
 on:
   workflow_dispatch:
@@ -26,13 +26,13 @@ jobs:
         gettext git libncurses-dev libssl-dev python3-distutils rsync unzip zlib1g-dev swig qemu-utils
         sudo timedatectl set-timezone "$TZ"
 
-    # --- 核心修改：使用官方插件拉取源码，彻底解决 128 报错 ---
+    # --- 核心修复：删除 ref: master，让它自动拉取默认分支 ---
     - name: Clone Source Code
       uses: actions/checkout@v4
       with:
         repository: hanwckf/immortalwrt-mt798x
-        ref: master
         path: openwrt
+        # 这里删除了 ref 字段，自动使用作者设置的默认分支 (openwrt-21.02)
 
     - name: Add Passwall Feeds
       run: |
