@@ -1,4 +1,4 @@
-name: AX6000 Passwall (Custom Settings)
+name: AX6000 Passwall (Final Fixed)
 
 on:
   workflow_dispatch:
@@ -6,8 +6,6 @@ on:
     - cron: '0 18 */3 * *'
 
 env:
-  REPO_URL: https://github.com/hanwckf/immortalwrt-mt7986
-  REPO_BRANCH: master
   TZ: Asia/Shanghai
 
 jobs:
@@ -30,9 +28,15 @@ jobs:
         git config --global user.email "action@github.com"
         git config --global user.name "GitHub Action"
 
-    - name: Clone Source
+    - name: Clone Source Code
       run: |
-        git clone $REPO_URL -b $REPO_BRANCH openwrt
+        # --- 修复 Git 报错的关键步骤 ---
+        # 强制清除可能干扰的 Token
+        git config --global --unset http.https://github.com/.extraheader || true
+        
+        # 直接拉取源码，不使用变量，防止解析错误
+        echo "Cloning hanwckf/immortalwrt-mt7986..."
+        git clone https://github.com/hanwckf/immortalwrt-mt7986 -b master openwrt
 
     - name: Add Passwall Feeds
       run: |
@@ -46,60 +50,53 @@ jobs:
       run: |
         cd openwrt
         
-        # 1. 载入 AX6000 基础配置
+        # 1. 载入 AX6000 默认配置
         cp defconfig/mt7986-ax6000.config .config
         
-        # 2. 写入 Passwall 插件配置
+        # 2. 开启 Passwall
         echo "CONFIG_PACKAGE_luci-app-passwall=y" >> .config
         echo "CONFIG_PACKAGE_luci-app-passwall_INCLUDE_ChinaDNS_NG=y" >> .config
         echo "CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Xray=y" >> .config
         echo "CONFIG_PACKAGE_luci-app-passwall_INCLUDE_SingBox=y" >> .config
         echo "CONFIG_PACKAGE_luci-i18n-passwall-zh-cn=y" >> .config
 
-        # =======================================================
-        # 3. 【核心修改】应用你的个性化设置
-        # =======================================================
+        # 3. --- 个性化设置 (IP/密码/拨号/WiFi) ---
         
-        # [修改 A] 设置默认 IP 为 192.168.8.1
+        # 修改 A: 默认 IP 改为 192.168.8.1
         sed -i 's/192.168.1.1/192.168.8.1/g' package/base-files/files/bin/config_generate
         
-        # [修改 B/C/D] 创建首次启动脚本 (修改密码、PPPoE、WiFi)
-        # 这个脚本会在刷机后第一次启动时自动执行
+        # 修改 B: 生成首次启动脚本 (设置密码、PPPoE、WiFi)
         mkdir -p package/base-files/files/etc/uci-defaults
         cat <<EOF > package/base-files/files/etc/uci-defaults/99-custom-settings
         #!/bin/sh
         
-        # --- 1. 修改后台 root 密码 ---
-        # 你的密码是 851129
+        # 1. 修改 root 密码 (851129)
         echo -e "851129\n851129" | passwd root
         
         uci -q batch <<EOT
-        # --- 2. 设置 PPPoE 拨号 ---
+        # 2. 设置 PPPoE 拨号
         set network.wan.proto='pppoe'
         set network.wan.username='637143646974'
         set network.wan.password='888888'
         
-        # --- 3. 设置 WiFi (2.4G 和 5G) ---
-        # 2.4G 设置
+        # 3. 设置 WiFi (2.4G)
         set wireless.default_radio0.ssid='OpenWrt_2.4G'
         set wireless.default_radio0.key='19851129z'
         set wireless.default_radio0.encryption='psk2'
         
-        # 5G 设置
+        # 4. 设置 WiFi (5G)
         set wireless.default_radio1.ssid='OpenWrt_5G'
         set wireless.default_radio1.key='19851129z'
         set wireless.default_radio1.encryption='psk2'
         
-        # 提交应用
         commit network
         commit wireless
         EOT
         
         exit 0
         EOF
-        # =======================================================
-
-        # 4. 生成最终编译配置
+        
+        # 4. 生成最终配置
         make defconfig
 
     - name: Download Packages
