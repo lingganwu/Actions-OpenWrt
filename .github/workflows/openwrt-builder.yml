@@ -1,4 +1,4 @@
-name: AX6000 Passwall (Always Latest)
+name: AX6000 Passwall (Fix Compile Error)
 
 on:
   workflow_dispatch:
@@ -32,37 +32,29 @@ jobs:
         repository: hanwckf/immortalwrt-mt798x
         path: openwrt
 
-    # =========================================================
-    # 步骤 1：强制升级 Go 语言 (最新版 Passwall 的核心依赖)
-    # =========================================================
-    - name: Update Golang to Latest
-      run: |
-        cd openwrt
-        # 删除源码自带的老版本 Golang
-        rm -rf feeds/packages/lang/golang
-        # 拉取最新的 Golang 编译环境
-        git clone https://github.com/sbwml/packages_lang_golang -b 22.x feeds/packages/lang/golang
-
-    # =========================================================
-    # 步骤 2：清理旧版 & 拉取最新 Passwall 源码
-    # =========================================================
-    - name: Add Latest Passwall Feeds
+    - name: Update & Install Feeds (Order Fixed)
       run: |
         cd openwrt
         
-        # 1. 添加 feeds 源 (使用 xiaorouji 的 main 分支，即开发版)
+        # 1. 先添加 Passwall 源
         echo "src-git passwall_packages https://github.com/xiaorouji/openwrt-passwall-packages.git;main" >> feeds.conf.default
         echo "src-git passwall https://github.com/xiaorouji/openwrt-passwall.git;main" >> feeds.conf.default
         
-        # 2. 更新 feeds
+        # 2. 更新所有 Feeds (这一步会把官方旧的 Golang 拉下来)
         ./scripts/feeds update -a
         
-        # 3. 【关键】删除可能冲突的同名包，确保使用我们新加的源
-        rm -rf feeds/luci/applications/luci-app-passwall
+        # 3. 【关键修复】更新完之后，再删除旧的 Golang 和冲突包
+        echo "Removing conflicting packages..."
+        rm -rf feeds/packages/lang/golang
         rm -rf feeds/packages/net/xray-core
         rm -rf feeds/packages/net/sing-box
+        rm -rf feeds/luci/applications/luci-app-passwall
         
-        # 4. 安装 feeds
+        # 4. 拉取 sbwml 的新版 Golang (Go 1.22+)
+        echo "Cloning new Golang..."
+        git clone https://github.com/sbwml/packages_lang_golang -b 22.x feeds/packages/lang/golang
+        
+        # 5. 最后安装 Feeds
         ./scripts/feeds install -a
 
     - name: Generate Config & Custom Settings
@@ -81,7 +73,7 @@ jobs:
         echo "CONFIG_PACKAGE_luci-i18n-passwall-zh-cn=y" >> .config
 
         # =======================================================
-        # 步骤 3：个性化设置 (IP / 密码 / WiFi)
+        # 个性化设置 (IP / 密码 / WiFi)
         # =======================================================
         
         # [IP] 修改默认 IP 为 192.168.8.1
@@ -131,6 +123,7 @@ jobs:
       run: |
         cd openwrt
         echo "Starting compilation..."
+        # 使用多线程编译，如果失败则自动切换单线程详细输出 (V=s) 以便于排错
         make -j$(nproc) || make -j1 V=s
         echo "status=success" >> $GITHUB_OUTPUT
 
