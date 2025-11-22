@@ -1,4 +1,4 @@
-name: AX6000 Passwall (Selectable & Fixed)
+name: AX6000 Final Stable Build
 
 on:
   schedule:
@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       source_repo:
-        description: '选择源码 (推荐 Padavanonly，兼容性更好)'
+        description: '强烈建议选 Padavanonly (稳+新)'
         required: true
         default: 'padavanonly'
         type: choice
@@ -36,29 +36,29 @@ jobs:
         sudo timedatectl set-timezone "$TZ"
 
     # =========================================================
-    # 步骤 1：选择源码 (带逻辑判断)
+    # 核心修复：使用官方插件拉取源码 (绝不报 Error 128)
     # =========================================================
-    - name: Clone Source Code
-      run: |
-        SOURCE="${{ inputs.source_repo }}"
-        # 定时任务默认用 padavanonly (因为它编译更稳)
-        [ -z "$SOURCE" ] && SOURCE="padavanonly"
-        
-        if [ "$SOURCE" == "padavanonly" ]; then
-          echo "-----------------------------------------------"
-          echo "正在克隆 Padavanonly 源码 (推荐，闭源驱动+新内核)..."
-          echo "-----------------------------------------------"
-          git clone https://github.com/padavanonly/immortalwrt-mt7986.git -b master openwrt
-        else
-          echo "-----------------------------------------------"
-          echo "正在克隆 Hanwckf 源码 (21.02 旧内核)..."
-          echo "注意：旧内核编译最新 Sing-Box 可能会有兼容性风险"
-          echo "-----------------------------------------------"
-          git clone https://github.com/hanwckf/immortalwrt-mt798x.git -b openwrt-21.02 openwrt
-        fi
+    
+    # 分支 1: Padavanonly (推荐)
+    - name: Clone Source (Padavanonly)
+      if: github.event.inputs.source_repo == 'padavanonly' || github.event_name == 'schedule'
+      uses: actions/checkout@v4
+      with:
+        repository: padavanonly/immortalwrt-mt7986
+        ref: master
+        path: openwrt
+
+    # 分支 2: Hanwckf (备选)
+    - name: Clone Source (Hanwckf)
+      if: github.event.inputs.source_repo == 'hanwckf'
+      uses: actions/checkout@v4
+      with:
+        repository: hanwckf/immortalwrt-mt798x
+        ref: openwrt-21.02
+        path: openwrt
 
     # =========================================================
-    # 步骤 2：处理 Feeds 和 依赖 (核心修复 Error 2)
+    # 步骤 2：处理依赖 (先删后加，顺序绝对不能乱)
     # =========================================================
     - name: Update & Install Feeds
       run: |
@@ -68,53 +68,52 @@ jobs:
         echo "src-git passwall_packages https://github.com/xiaorouji/openwrt-passwall-packages.git;main" >> feeds.conf.default
         echo "src-git passwall https://github.com/xiaorouji/openwrt-passwall.git;main" >> feeds.conf.default
         
-        # 2. 更新官方源
+        # 2. 更新官方源 (这一步会拉取官方旧的 Go)
         ./scripts/feeds update -a
         
-        # 3. 【清理】删除可能导致 Error 2 的冲突包
-        echo "Removing conflicting packages..."
+        # 3. 【关键】删除冲突包 (必须在 install 之前删干净)
+        echo "Deleting conflicting packages..."
         rm -rf feeds/packages/lang/golang
         rm -rf feeds/packages/net/xray-core
         rm -rf feeds/packages/net/sing-box
         rm -rf feeds/luci/applications/luci-app-passwall
         
-        # 4. 【替换】拉取 sbwml 的 Go (解决 Sing-Box 编译失败)
-        echo "Cloning Go 1.22+..."
+        # 4. 【关键】拉取 sbwml 的新 Go (Go 1.22+)
+        echo "Cloning latest Go..."
         git clone https://github.com/sbwml/packages_lang_golang -b 22.x feeds/packages/lang/golang
         
-        # 5. 安装
+        # 5. 安装所有依赖
         ./scripts/feeds install -a
 
     # =========================================================
-    # 步骤 3：生成配置 (通用适配)
+    # 步骤 3：配置生成 & 个性化 (WiFi 索引法 + IP)
     # =========================================================
-    - name: Generate Config & Custom Settings
+    - name: Generate Config
       run: |
         cd openwrt
         
         # 1. 载入 AX6000 默认配置
         cp defconfig/mt7986-ax6000.config .config
         
-        # 2. 开启 Passwall 全家桶
+        # 2. 写入插件配置
         echo "CONFIG_PACKAGE_luci-app-passwall=y" >> .config
         echo "CONFIG_PACKAGE_luci-app-passwall_INCLUDE_ChinaDNS_NG=y" >> .config
         echo "CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Xray=y" >> .config
         echo "CONFIG_PACKAGE_luci-app-passwall_INCLUDE_SingBox=y" >> .config
         echo "CONFIG_PACKAGE_sing-box=y" >> .config
         echo "CONFIG_PACKAGE_luci-i18n-passwall-zh-cn=y" >> .config
-        
-        # 3. 确保 Golang 编译器被启用 (防止 Error 2)
+        # 防止编译报错的保险参数
         echo "CONFIG_GOLANG_EXTERNAL_BOOTSTRAP_ROOT=\"\"" >> .config
 
-        # [IP 设置]
+        # 3. 修改 IP (192.168.8.1)
         sed -i 's/192.168.1.1/192.168.8.1/g' package/base-files/files/bin/config_generate
         
-        # [启动脚本] 强制修改 WiFi (索引法) 和 密码/拨号
+        # 4. 生成启动脚本 (WiFi/密码/PPPoE)
         mkdir -p package/base-files/files/etc/uci-defaults
         cat <<EOF > package/base-files/files/etc/uci-defaults/99-custom-settings
         #!/bin/sh
         
-        # 修改 root 密码 (851129)
+        # 修改密码
         echo -e "851129\n851129" | passwd root
         
         uci -q batch <<EOT
@@ -123,12 +122,12 @@ jobs:
         set network.wan.username='637143646974'
         set network.wan.password='888888'
         
-        # WiFi 2.4G (索引 0)
+        # WiFi 2.4G (使用索引 0，确保生效)
         set wireless.@wifi-iface[0].ssid='OpenWrt_2.4G'
         set wireless.@wifi-iface[0].key='19851129z'
         set wireless.@wifi-iface[0].encryption='psk2'
         
-        # WiFi 5G (索引 1)
+        # WiFi 5G (使用索引 1，确保生效)
         set wireless.@wifi-iface[1].ssid='OpenWrt_5G'
         set wireless.@wifi-iface[1].key='19851129z'
         set wireless.@wifi-iface[1].encryption='psk2'
@@ -136,7 +135,6 @@ jobs:
         commit network
         commit wireless
         EOT
-        
         exit 0
         EOF
         
@@ -145,14 +143,14 @@ jobs:
     - name: Download Packages
       run: |
         cd openwrt
-        make download -j8 || make download -j1 V=s
+        make download -j8
 
     - name: Compile Firmware
       id: compile
       run: |
         cd openwrt
         echo "Starting compilation..."
-        # 增加 IGNORE_ERRORS=1 尝试忽略非致命错误
+        # 忽略非致命错误，只为出固件
         make -j$(nproc) || make -j1 V=s IGNORE_ERRORS=1
         echo "status=success" >> $GITHUB_OUTPUT
 
@@ -165,12 +163,10 @@ jobs:
         cd firmware_final
         TIME_TAG=$(date +"%Y%m%d")
         
-        # 标记文件名
         SOURCE="${{ inputs.source_repo }}"
         [ -z "$SOURCE" ] && SOURCE="padavanonly"
         
         for file in *; do mv "$file" "AX6000_${SOURCE}_${TIME_TAG}_${file}"; done
-        
         echo "FIRMWARE_PATH=$PWD" >> $GITHUB_ENV
         ls -lh
 
