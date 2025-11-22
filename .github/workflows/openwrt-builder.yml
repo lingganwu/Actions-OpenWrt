@@ -1,4 +1,4 @@
-name: AX6000 Passwall (Auto Branch)
+name: AX6000 Passwall (Always Latest)
 
 on:
   workflow_dispatch:
@@ -26,20 +26,43 @@ jobs:
         gettext git libncurses-dev libssl-dev python3-distutils rsync unzip zlib1g-dev swig qemu-utils
         sudo timedatectl set-timezone "$TZ"
 
-    # --- 核心修复：删除 ref: master，让它自动拉取默认分支 ---
     - name: Clone Source Code
       uses: actions/checkout@v4
       with:
         repository: hanwckf/immortalwrt-mt798x
         path: openwrt
-        # 这里删除了 ref 字段，自动使用作者设置的默认分支 (openwrt-21.02)
 
-    - name: Add Passwall Feeds
+    # =========================================================
+    # 步骤 1：强制升级 Go 语言 (最新版 Passwall 的核心依赖)
+    # =========================================================
+    - name: Update Golang to Latest
       run: |
         cd openwrt
+        # 删除源码自带的老版本 Golang
+        rm -rf feeds/packages/lang/golang
+        # 拉取最新的 Golang 编译环境
+        git clone https://github.com/sbwml/packages_lang_golang -b 22.x feeds/packages/lang/golang
+
+    # =========================================================
+    # 步骤 2：清理旧版 & 拉取最新 Passwall 源码
+    # =========================================================
+    - name: Add Latest Passwall Feeds
+      run: |
+        cd openwrt
+        
+        # 1. 添加 feeds 源 (使用 xiaorouji 的 main 分支，即开发版)
         echo "src-git passwall_packages https://github.com/xiaorouji/openwrt-passwall-packages.git;main" >> feeds.conf.default
         echo "src-git passwall https://github.com/xiaorouji/openwrt-passwall.git;main" >> feeds.conf.default
+        
+        # 2. 更新 feeds
         ./scripts/feeds update -a
+        
+        # 3. 【关键】删除可能冲突的同名包，确保使用我们新加的源
+        rm -rf feeds/luci/applications/luci-app-passwall
+        rm -rf feeds/packages/net/xray-core
+        rm -rf feeds/packages/net/sing-box
+        
+        # 4. 安装 feeds
         ./scripts/feeds install -a
 
     - name: Generate Config & Custom Settings
@@ -49,40 +72,44 @@ jobs:
         # 1. 载入 AX6000 默认配置
         cp defconfig/mt7986-ax6000.config .config
         
-        # 2. 开启 Passwall
+        # 2. 开启 Passwall 和 Sing-Box
         echo "CONFIG_PACKAGE_luci-app-passwall=y" >> .config
         echo "CONFIG_PACKAGE_luci-app-passwall_INCLUDE_ChinaDNS_NG=y" >> .config
         echo "CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Xray=y" >> .config
         echo "CONFIG_PACKAGE_luci-app-passwall_INCLUDE_SingBox=y" >> .config
+        echo "CONFIG_PACKAGE_sing-box=y" >> .config
         echo "CONFIG_PACKAGE_luci-i18n-passwall-zh-cn=y" >> .config
 
-        # 3. --- 个性化设置 ---
+        # =======================================================
+        # 步骤 3：个性化设置 (IP / 密码 / WiFi)
+        # =======================================================
         
-        # 修改默认 IP 为 192.168.8.1
+        # [IP] 修改默认 IP 为 192.168.8.1
         sed -i 's/192.168.1.1/192.168.8.1/g' package/base-files/files/bin/config_generate
         
-        # 生成首次启动脚本
+        # [启动脚本] 强制修改 WiFi 和 密码
         mkdir -p package/base-files/files/etc/uci-defaults
         cat <<EOF > package/base-files/files/etc/uci-defaults/99-custom-settings
         #!/bin/sh
         
-        # 修改 root 密码
+        # 1. 修改 root 密码 (851129)
         echo -e "851129\n851129" | passwd root
         
         uci -q batch <<EOT
-        # 设置 PPPoE
+        # 2. 设置 PPPoE 拨号
         set network.wan.proto='pppoe'
         set network.wan.username='637143646974'
         set network.wan.password='888888'
         
-        # 设置 WiFi
-        set wireless.default_radio0.ssid='OpenWrt_2.4G'
-        set wireless.default_radio0.key='19851129z'
-        set wireless.default_radio0.encryption='psk2'
+        # 3. 设置 WiFi (2.4G) - 索引 [0]
+        set wireless.@wifi-iface[0].ssid='OpenWrt_2.4G'
+        set wireless.@wifi-iface[0].key='19851129z'
+        set wireless.@wifi-iface[0].encryption='psk2'
         
-        set wireless.default_radio1.ssid='OpenWrt_5G'
-        set wireless.default_radio1.key='19851129z'
-        set wireless.default_radio1.encryption='psk2'
+        # 4. 设置 WiFi (5G) - 索引 [1]
+        set wireless.@wifi-iface[1].ssid='OpenWrt_5G'
+        set wireless.@wifi-iface[1].key='19851129z'
+        set wireless.@wifi-iface[1].encryption='psk2'
         
         commit network
         commit wireless
@@ -91,7 +118,7 @@ jobs:
         exit 0
         EOF
         
-        # 4. 生成配置
+        # 4. 生成最终配置
         make defconfig
 
     - name: Download Packages
