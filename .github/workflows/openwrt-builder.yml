@@ -1,4 +1,4 @@
-name: AX6000 Passwall (Fixed Hanwckf)
+name: AX6000 Passwall (Ultimate Fix)
 
 on:
   workflow_dispatch:
@@ -13,8 +13,8 @@ jobs:
     runs-on: ubuntu-22.04
     
     steps:
-    - name: Checkout
-      uses: actions/checkout@v3
+    - name: Checkout Runner
+      uses: actions/checkout@v4
 
     - name: Prepare Environment
       env:
@@ -25,14 +25,14 @@ jobs:
         sudo -E apt-get -qq install -y build-essential clang flex bison g++ gawk gcc-multilib g++-multilib \
         gettext git libncurses-dev libssl-dev python3-distutils rsync unzip zlib1g-dev swig qemu-utils
         sudo timedatectl set-timezone "$TZ"
-        git config --global user.email "action@github.com"
-        git config --global user.name "GitHub Action"
 
-    - name: Clone Source Code (Correct URL)
-      run: |
-        # --- 修正：使用正确的 hanwckf/immortalwrt-mt798x 仓库 ---
-        echo "Cloning hanwckf/immortalwrt-mt798x..."
-        git clone https://github.com/hanwckf/immortalwrt-mt798x.git -b master openwrt
+    # --- 核心修改：使用官方插件拉取源码，彻底解决 128 报错 ---
+    - name: Clone Source Code
+      uses: actions/checkout@v4
+      with:
+        repository: hanwckf/immortalwrt-mt798x
+        ref: master
+        path: openwrt
 
     - name: Add Passwall Feeds
       run: |
@@ -46,7 +46,7 @@ jobs:
       run: |
         cd openwrt
         
-        # 1. 载入 AX6000 默认配置 (路径保持不变)
+        # 1. 载入 AX6000 默认配置
         cp defconfig/mt7986-ax6000.config .config
         
         # 2. 开启 Passwall
@@ -61,12 +61,12 @@ jobs:
         # 修改默认 IP 为 192.168.8.1
         sed -i 's/192.168.1.1/192.168.8.1/g' package/base-files/files/bin/config_generate
         
-        # 生成首次启动脚本 (密码/PPPoE/WiFi)
+        # 生成首次启动脚本
         mkdir -p package/base-files/files/etc/uci-defaults
         cat <<EOF > package/base-files/files/etc/uci-defaults/99-custom-settings
         #!/bin/sh
         
-        # 修改 root 密码 (851129)
+        # 修改 root 密码
         echo -e "851129\n851129" | passwd root
         
         uci -q batch <<EOT
@@ -75,12 +75,11 @@ jobs:
         set network.wan.username='637143646974'
         set network.wan.password='888888'
         
-        # 设置 WiFi (2.4G)
+        # 设置 WiFi
         set wireless.default_radio0.ssid='OpenWrt_2.4G'
         set wireless.default_radio0.key='19851129z'
         set wireless.default_radio0.encryption='psk2'
         
-        # 设置 WiFi (5G)
         set wireless.default_radio1.ssid='OpenWrt_5G'
         set wireless.default_radio1.key='19851129z'
         set wireless.default_radio1.encryption='psk2'
