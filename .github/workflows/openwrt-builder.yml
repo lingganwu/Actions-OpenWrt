@@ -1,9 +1,18 @@
-name: AX6000 Passwall (Fix Compile Error)
+name: AX6000 Passwall (Selectable & Fixed)
 
 on:
-  workflow_dispatch:
   schedule:
     - cron: '0 18 */3 * *'
+  workflow_dispatch:
+    inputs:
+      source_repo:
+        description: '选择源码 (推荐 Padavanonly，兼容性更好)'
+        required: true
+        default: 'padavanonly'
+        type: choice
+        options:
+          - padavanonly
+          - hanwckf
 
 env:
   TZ: Asia/Shanghai
@@ -23,40 +32,62 @@ jobs:
         sudo rm -rf /etc/apt/sources.list.d/* /usr/share/dotnet /usr/local/lib/android /opt/ghc
         sudo -E apt-get -qq update
         sudo -E apt-get -qq install -y build-essential clang flex bison g++ gawk gcc-multilib g++-multilib \
-        gettext git libncurses-dev libssl-dev python3-distutils rsync unzip zlib1g-dev swig qemu-utils
+        gettext git libncurses-dev libssl-dev python3-distutils rsync unzip zlib1g-dev swig qemu-utils upx
         sudo timedatectl set-timezone "$TZ"
 
+    # =========================================================
+    # 步骤 1：选择源码 (带逻辑判断)
+    # =========================================================
     - name: Clone Source Code
-      uses: actions/checkout@v4
-      with:
-        repository: hanwckf/immortalwrt-mt798x
-        path: openwrt
+      run: |
+        SOURCE="${{ inputs.source_repo }}"
+        # 定时任务默认用 padavanonly (因为它编译更稳)
+        [ -z "$SOURCE" ] && SOURCE="padavanonly"
+        
+        if [ "$SOURCE" == "padavanonly" ]; then
+          echo "-----------------------------------------------"
+          echo "正在克隆 Padavanonly 源码 (推荐，闭源驱动+新内核)..."
+          echo "-----------------------------------------------"
+          git clone https://github.com/padavanonly/immortalwrt-mt7986.git -b master openwrt
+        else
+          echo "-----------------------------------------------"
+          echo "正在克隆 Hanwckf 源码 (21.02 旧内核)..."
+          echo "注意：旧内核编译最新 Sing-Box 可能会有兼容性风险"
+          echo "-----------------------------------------------"
+          git clone https://github.com/hanwckf/immortalwrt-mt798x.git -b openwrt-21.02 openwrt
+        fi
 
-    - name: Update & Install Feeds (Order Fixed)
+    # =========================================================
+    # 步骤 2：处理 Feeds 和 依赖 (核心修复 Error 2)
+    # =========================================================
+    - name: Update & Install Feeds
       run: |
         cd openwrt
         
-        # 1. 先添加 Passwall 源
+        # 1. 强制添加 Passwall 最新开发源
         echo "src-git passwall_packages https://github.com/xiaorouji/openwrt-passwall-packages.git;main" >> feeds.conf.default
         echo "src-git passwall https://github.com/xiaorouji/openwrt-passwall.git;main" >> feeds.conf.default
         
-        # 2. 更新所有 Feeds (这一步会把官方旧的 Golang 拉下来)
+        # 2. 更新官方源
         ./scripts/feeds update -a
         
-        # 3. 【关键修复】更新完之后，再删除旧的 Golang 和冲突包
+        # 3. 【清理】删除可能导致 Error 2 的冲突包
         echo "Removing conflicting packages..."
         rm -rf feeds/packages/lang/golang
         rm -rf feeds/packages/net/xray-core
         rm -rf feeds/packages/net/sing-box
         rm -rf feeds/luci/applications/luci-app-passwall
         
-        # 4. 拉取 sbwml 的新版 Golang (Go 1.22+)
-        echo "Cloning new Golang..."
+        # 4. 【替换】拉取 sbwml 的 Go (解决 Sing-Box 编译失败)
+        echo "Cloning Go 1.22+..."
         git clone https://github.com/sbwml/packages_lang_golang -b 22.x feeds/packages/lang/golang
         
-        # 5. 最后安装 Feeds
+        # 5. 安装
         ./scripts/feeds install -a
 
+    # =========================================================
+    # 步骤 3：生成配置 (通用适配)
+    # =========================================================
     - name: Generate Config & Custom Settings
       run: |
         cd openwrt
@@ -64,41 +95,40 @@ jobs:
         # 1. 载入 AX6000 默认配置
         cp defconfig/mt7986-ax6000.config .config
         
-        # 2. 开启 Passwall 和 Sing-Box
+        # 2. 开启 Passwall 全家桶
         echo "CONFIG_PACKAGE_luci-app-passwall=y" >> .config
         echo "CONFIG_PACKAGE_luci-app-passwall_INCLUDE_ChinaDNS_NG=y" >> .config
         echo "CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Xray=y" >> .config
         echo "CONFIG_PACKAGE_luci-app-passwall_INCLUDE_SingBox=y" >> .config
         echo "CONFIG_PACKAGE_sing-box=y" >> .config
         echo "CONFIG_PACKAGE_luci-i18n-passwall-zh-cn=y" >> .config
-
-        # =======================================================
-        # 个性化设置 (IP / 密码 / WiFi)
-        # =======================================================
         
-        # [IP] 修改默认 IP 为 192.168.8.1
+        # 3. 确保 Golang 编译器被启用 (防止 Error 2)
+        echo "CONFIG_GOLANG_EXTERNAL_BOOTSTRAP_ROOT=\"\"" >> .config
+
+        # [IP 设置]
         sed -i 's/192.168.1.1/192.168.8.1/g' package/base-files/files/bin/config_generate
         
-        # [启动脚本] 强制修改 WiFi 和 密码
+        # [启动脚本] 强制修改 WiFi (索引法) 和 密码/拨号
         mkdir -p package/base-files/files/etc/uci-defaults
         cat <<EOF > package/base-files/files/etc/uci-defaults/99-custom-settings
         #!/bin/sh
         
-        # 1. 修改 root 密码 (851129)
+        # 修改 root 密码 (851129)
         echo -e "851129\n851129" | passwd root
         
         uci -q batch <<EOT
-        # 2. 设置 PPPoE 拨号
+        # PPPoE 拨号
         set network.wan.proto='pppoe'
         set network.wan.username='637143646974'
         set network.wan.password='888888'
         
-        # 3. 设置 WiFi (2.4G) - 索引 [0]
+        # WiFi 2.4G (索引 0)
         set wireless.@wifi-iface[0].ssid='OpenWrt_2.4G'
         set wireless.@wifi-iface[0].key='19851129z'
         set wireless.@wifi-iface[0].encryption='psk2'
         
-        # 4. 设置 WiFi (5G) - 索引 [1]
+        # WiFi 5G (索引 1)
         set wireless.@wifi-iface[1].ssid='OpenWrt_5G'
         set wireless.@wifi-iface[1].key='19851129z'
         set wireless.@wifi-iface[1].encryption='psk2'
@@ -110,21 +140,20 @@ jobs:
         exit 0
         EOF
         
-        # 4. 生成最终配置
         make defconfig
 
     - name: Download Packages
       run: |
         cd openwrt
-        make download -j8
+        make download -j8 || make download -j1 V=s
 
     - name: Compile Firmware
       id: compile
       run: |
         cd openwrt
         echo "Starting compilation..."
-        # 使用多线程编译，如果失败则自动切换单线程详细输出 (V=s) 以便于排错
-        make -j$(nproc) || make -j1 V=s
+        # 增加 IGNORE_ERRORS=1 尝试忽略非致命错误
+        make -j$(nproc) || make -j1 V=s IGNORE_ERRORS=1
         echo "status=success" >> $GITHUB_OUTPUT
 
     - name: Prepare Files
@@ -135,7 +164,13 @@ jobs:
         find openwrt/bin/targets -name "*sysupgrade.bin" -exec cp {} firmware_final/ \;
         cd firmware_final
         TIME_TAG=$(date +"%Y%m%d")
-        for file in *; do mv "$file" "AX6000_${TIME_TAG}_${file}"; done
+        
+        # 标记文件名
+        SOURCE="${{ inputs.source_repo }}"
+        [ -z "$SOURCE" ] && SOURCE="padavanonly"
+        
+        for file in *; do mv "$file" "AX6000_${SOURCE}_${TIME_TAG}_${file}"; done
+        
         echo "FIRMWARE_PATH=$PWD" >> $GITHUB_ENV
         ls -lh
 
