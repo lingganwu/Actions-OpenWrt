@@ -1,0 +1,162 @@
+name: AX6000 Official ImmortalWrt
+
+on:
+  schedule:
+    - cron: '0 18 */3 * *'
+  workflow_dispatch:
+
+env:
+  TZ: Asia/Shanghai
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    
+    steps:
+    - name: Checkout Runner
+      uses: actions/checkout@v4
+
+    - name: Prepare Environment
+      env:
+        DEBIAN_FRONTEND: noninteractive
+      run: |
+        sudo rm -rf /etc/apt/sources.list.d/* /usr/share/dotnet /usr/local/lib/android /opt/ghc
+        sudo -E apt-get -qq update
+        sudo -E apt-get -qq install -y build-essential clang flex bison g++ gawk gcc-multilib g++-multilib \
+        gettext git libncurses-dev libssl-dev python3-distutils rsync unzip zlib1g-dev swig qemu-utils upx
+        sudo timedatectl set-timezone "$TZ"
+
+    # =========================================================
+    # 1. 拉取 ImmortalWrt 官方源码 (分支 23.05)
+    # =========================================================
+    - name: Clone Source
+      uses: actions/checkout@v4
+      with:
+        repository: immortalwrt/immortalwrt
+        ref: openwrt-23.05
+        path: openwrt
+
+    # =========================================================
+    # 2. 添加插件源 (官方源很干净，直接加 Passwall 即可)
+    # =========================================================
+    - name: Update Feeds
+      run: |
+        cd openwrt
+        
+        # 添加 Passwall 源
+        echo "src-git passwall_packages https://github.com/xiaorouji/openwrt-passwall-packages.git;main" >> feeds.conf.default
+        echo "src-git passwall https://github.com/xiaorouji/openwrt-passwall.git;main" >> feeds.conf.default
+        
+        # 更新并安装
+        ./scripts/feeds update -a
+        ./scripts/feeds install -a
+
+    # =========================================================
+    # 3. 生成配置 (这是最关键的一步，手动指定 AX6000)
+    # =========================================================
+    - name: Generate Config
+      run: |
+        cd openwrt
+        
+        # --- 定制配置 ---
+        # 1. 目标平台: MediaTek Ralink ARM
+        echo "CONFIG_TARGET_mediatek=y" > .config
+        # 2. 子目标: Filogic 830 (MT7986)
+        echo "CONFIG_TARGET_mediatek_filogic=y" >> .config
+        # 3. 具体设备: Xiaomi Redmi Router AX6000
+        echo "CONFIG_TARGET_mediatek_filogic_DEVICE_xiaomi_redmi-router-ax6000=y" >> .config
+        
+        # 4. 开启 Passwall 和 Sing-Box
+        echo "CONFIG_PACKAGE_luci-app-passwall=y" >> .config
+        echo "CONFIG_PACKAGE_luci-app-passwall_INCLUDE_ChinaDNS_NG=y" >> .config
+        echo "CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Xray=y" >> .config
+        echo "CONFIG_PACKAGE_luci-app-passwall_INCLUDE_SingBox=y" >> .config
+        echo "CONFIG_PACKAGE_sing-box=y" >> .config
+        echo "CONFIG_PACKAGE_luci-i18n-passwall-zh-cn=y" >> .config
+        
+        # 5. 开启硬件加速 (关键！防止网速慢)
+        echo "CONFIG_PACKAGE_kmod-nft-offload=y" >> .config
+        echo "CONFIG_LUCI_LANG_zh_Hans=y" >> .config
+
+        # 6. 个性化设置 (IP/密码/WiFi)
+        sed -i 's/192.168.1.1/192.168.8.1/g' package/base-files/files/bin/config_generate
+        
+        mkdir -p package/base-files/files/etc/uci-defaults
+        cat <<EOF > package/base-files/files/etc/uci-defaults/99-custom-settings
+        #!/bin/sh
+        
+        # 修改密码 851129
+        echo -e "851129\n851129" | passwd root
+        
+        uci -q batch <<EOT
+        # 拨号
+        set network.wan.proto='pppoe'
+        set network.wan.username='637143646974'
+        set network.wan.password='888888'
+        
+        # 开启硬件加速 (Flow Offloading) - 尝试自动配置
+        set firewall.defaults.flow_offloading='1'
+        set firewall.defaults.flow_offloading_hw='1'
+        
+        # WiFi 2.4G
+        set wireless.default_radio0.ssid='OpenWrt_2.4G'
+        set wireless.default_radio0.key='19851129z'
+        set wireless.default_radio0.encryption='psk2'
+        
+        # WiFi 5G
+        set wireless.default_radio1.ssid='OpenWrt_5G'
+        set wireless.default_radio1.key='19851129z'
+        set wireless.default_radio1.encryption='psk2'
+        
+        commit network
+        commit wireless
+        commit firewall
+        EOT
+        exit 0
+        EOF
+        
+        # 生成完整配置
+        make defconfig
+
+    - name: Download Packages
+      run: |
+        cd openwrt
+        make download -j8
+
+    - name: Compile Firmware
+      id: compile
+      run: |
+        cd openwrt
+        echo "Starting compilation..."
+        make -j$(nproc) || make -j1 V=s
+        echo "status=success" >> $GITHUB_OUTPUT
+
+    - name: Prepare Files
+      id: organize
+      if: steps.compile.outputs.status == 'success'
+      run: |
+        mkdir -p firmware_final
+        find openwrt/bin/targets -name "*sysupgrade.bin" -exec cp {} firmware_final/ \;
+        cd firmware_final
+        TIME_TAG=$(date +"%Y%m%d")
+        
+        for file in *; do mv "$file" "AX6000_ImmortalWrt_${TIME_TAG}_${file}"; done
+        echo "FIRMWARE_PATH=$PWD" >> $GITHUB_ENV
+        ls -lh
+
+    - name: Upload to OneDrive
+      if: steps.compile.outputs.status == 'success' && env.RCLONE_CONF != ''
+      uses: wei/rclone@v1
+      env:
+        RCLONE_CONF: ${{ secrets.RCLONE_CONF }}
+      with:
+        args: copy ${{ env.FIRMWARE_PATH }} onedrive:/OpenWrt_Builds/
+
+    - name: Upload to GitHub Release
+      uses: softprops/action-gh-release@v1
+      if: steps.compile.outputs.status == 'success' && !cancelled()
+      with:
+        tag_name: AX6000_Build_${{ github.run_number }}
+        files: ${{ env.FIRMWARE_PATH }}/*
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
