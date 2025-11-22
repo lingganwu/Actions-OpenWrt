@@ -1,9 +1,9 @@
-name: AX6000 Passwall (3-Day Loop + OneDrive)
+name: AX6000 Passwall (Custom Settings)
 
 on:
-  workflow_dispatch: # 允许手动点击按钮开始
+  workflow_dispatch:
   schedule:
-    - cron: '0 18 */3 * *' # 每3天执行一次 (北京时间凌晨02:00)
+    - cron: '0 18 */3 * *'
 
 env:
   REPO_URL: https://github.com/hanwckf/immortalwrt-mt7986
@@ -30,35 +30,76 @@ jobs:
         git config --global user.email "action@github.com"
         git config --global user.name "GitHub Action"
 
-    - name: Clone Source (hanwckf/mt7986)
+    - name: Clone Source
       run: |
         git clone $REPO_URL -b $REPO_BRANCH openwrt
 
     - name: Add Passwall Feeds
       run: |
         cd openwrt
-        # 1. 添加 Passwall 源
         echo "src-git passwall_packages https://github.com/xiaorouji/openwrt-passwall-packages.git;main" >> feeds.conf.default
         echo "src-git passwall https://github.com/xiaorouji/openwrt-passwall.git;main" >> feeds.conf.default
-        
-        # 2. 更新并安装
         ./scripts/feeds update -a
         ./scripts/feeds install -a
 
-    - name: Generate Config (AX6000)
+    - name: Generate Config & Custom Settings
       run: |
         cd openwrt
-        # 1. 载入 Redmi AX6000 默认配置
+        
+        # 1. 载入 AX6000 基础配置
         cp defconfig/mt7986-ax6000.config .config
         
-        # 2. 强制写入 Passwall 配置
+        # 2. 写入 Passwall 插件配置
         echo "CONFIG_PACKAGE_luci-app-passwall=y" >> .config
         echo "CONFIG_PACKAGE_luci-app-passwall_INCLUDE_ChinaDNS_NG=y" >> .config
         echo "CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Xray=y" >> .config
         echo "CONFIG_PACKAGE_luci-app-passwall_INCLUDE_SingBox=y" >> .config
         echo "CONFIG_PACKAGE_luci-i18n-passwall-zh-cn=y" >> .config
+
+        # =======================================================
+        # 3. 【核心修改】应用你的个性化设置
+        # =======================================================
         
-        # 3. 生成完整配置
+        # [修改 A] 设置默认 IP 为 192.168.8.1
+        sed -i 's/192.168.1.1/192.168.8.1/g' package/base-files/files/bin/config_generate
+        
+        # [修改 B/C/D] 创建首次启动脚本 (修改密码、PPPoE、WiFi)
+        # 这个脚本会在刷机后第一次启动时自动执行
+        mkdir -p package/base-files/files/etc/uci-defaults
+        cat <<EOF > package/base-files/files/etc/uci-defaults/99-custom-settings
+        #!/bin/sh
+        
+        # --- 1. 修改后台 root 密码 ---
+        # 你的密码是 851129
+        echo -e "851129\n851129" | passwd root
+        
+        uci -q batch <<EOT
+        # --- 2. 设置 PPPoE 拨号 ---
+        set network.wan.proto='pppoe'
+        set network.wan.username='637143646974'
+        set network.wan.password='888888'
+        
+        # --- 3. 设置 WiFi (2.4G 和 5G) ---
+        # 2.4G 设置
+        set wireless.default_radio0.ssid='OpenWrt_2.4G'
+        set wireless.default_radio0.key='19851129z'
+        set wireless.default_radio0.encryption='psk2'
+        
+        # 5G 设置
+        set wireless.default_radio1.ssid='OpenWrt_5G'
+        set wireless.default_radio1.key='19851129z'
+        set wireless.default_radio1.encryption='psk2'
+        
+        # 提交应用
+        commit network
+        commit wireless
+        EOT
+        
+        exit 0
+        EOF
+        # =======================================================
+
+        # 4. 生成最终编译配置
         make defconfig
 
     - name: Download Packages
@@ -74,34 +115,26 @@ jobs:
         make -j$(nproc) || make -j1 V=s
         echo "status=success" >> $GITHUB_OUTPUT
 
-    - name: Prepare Files for Upload
+    - name: Prepare Files
       id: organize
       if: steps.compile.outputs.status == 'success'
       run: |
         mkdir -p firmware_final
-        # 提取 sysupgrade.bin (刷机包)
         find openwrt/bin/targets -name "*sysupgrade.bin" -exec cp {} firmware_final/ \;
-        
         cd firmware_final
-        # 重命名增加时间戳
         TIME_TAG=$(date +"%Y%m%d")
-        for file in *; do mv "$file" "AX6000_Passwall_${TIME_TAG}_${file}"; done
-        
+        for file in *; do mv "$file" "AX6000_${TIME_TAG}_${file}"; done
         echo "FIRMWARE_PATH=$PWD" >> $GITHUB_ENV
-        echo "Files to upload:"
         ls -lh
 
-    # --- 方案A: 上传到 OneDrive (如果你配置了 Secret) ---
     - name: Upload to OneDrive
       if: steps.compile.outputs.status == 'success' && env.RCLONE_CONF != ''
       uses: wei/rclone@v1
       env:
         RCLONE_CONF: ${{ secrets.RCLONE_CONF }}
       with:
-        # 将文件复制到 OneDrive 的 OpenWrt_Builds 文件夹
         args: copy ${{ env.FIRMWARE_PATH }} onedrive:/OpenWrt_Builds/
 
-    # --- 方案B: 上传到 GitHub Release (保底方案) ---
     - name: Upload to GitHub Release
       uses: softprops/action-gh-release@v1
       if: steps.compile.outputs.status == 'success' && !cancelled()
