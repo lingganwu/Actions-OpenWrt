@@ -1,4 +1,4 @@
-name: AX6000 Final (Separate Compile Xray)
+name: AX6000 Final (S-UI Optimized)
 
 on:
   schedule:
@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       branch:
-        description: '选择分支 (推荐 23.05)'
+        description: '选择源码 (建议选 23.05 稳定版)'
         required: true
         default: 'openwrt-23.05'
         type: choice
@@ -25,22 +25,25 @@ jobs:
     - name: Checkout Runner
       uses: actions/checkout@v4
 
-    # 1. 暴力清理磁盘 + 挂载 8GB 超大 Swap (确保内存绝对够)
-    - name: Free Space & Create 8G Swap
+    # =========================================================
+    # 1. 环境大扫除 (清理20G空间 + 挂载8G虚拟内存)
+    # =========================================================
+    - name: Free Space & Create Swap
       run: |
-        echo "Cleaning disk..."
+        echo "1. Cleaning disk..."
         sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
         sudo docker image prune -a -f
         sudo apt-get -qq clean
         sudo apt-get -qq autoremove --purge
         
-        echo "Creating 8GB Swap..."
+        echo "2. Creating 8GB Swap..."
         sudo fallocate -l 8G /swapfile
         sudo chmod 600 /swapfile
         sudo mkswap /swapfile
         sudo swapon /swapfile
         
-        echo "Status:"
+        echo "3. Status:"
+        df -hT
         free -h
 
     - name: Prepare Environment
@@ -53,7 +56,9 @@ jobs:
         gettext git libncurses-dev libssl-dev python3-distutils rsync unzip zlib1g-dev swig qemu-utils upx
         sudo timedatectl set-timezone "$TZ"
 
-    # 2. 拉取官方源码
+    # =========================================================
+    # 2. 拉取官方源码 (最稳的底座)
+    # =========================================================
     - name: Clone Source
       uses: actions/checkout@v4
       with:
@@ -61,76 +66,99 @@ jobs:
         ref: ${{ inputs.branch || 'openwrt-23.05' }}
         path: openwrt
 
-    # 3. 替换 Go + 添加 Passwall
-    - name: Update Feeds & Fix Go
+    # =========================================================
+    # 3. 替换 Go 环境 (适配 Sing-Box) + 添加 Passwall
+    # =========================================================
+    - name: Update Feeds & Dependencies
       run: |
         cd openwrt
         ./scripts/feeds update -a
         
-        # 删除冲突包
+        # --- 核心操作：删除冲突包 ---
+        # 必须删除官方旧版，否则 Passwall 无法编译最新核心
         rm -rf feeds/packages/lang/golang
-        rm -rf feeds/packages/net/xray-core
         rm -rf feeds/packages/net/sing-box
+        rm -rf feeds/packages/net/xray-core
         rm -rf feeds/luci/applications/luci-app-passwall
         
-        # 拉取高性能 Go
+        # --- 核心操作：拉取新环境 ---
+        # 1. 拉取 sbwml 的高性能 Go (编译 Sing-Box 必备)
         git clone https://github.com/sbwml/packages_lang_golang -b 22.x feeds/packages/lang/golang
         
-        # 添加 Passwall
+        # 2. 添加 Passwall 源
         echo "src-git passwall_packages https://github.com/xiaorouji/openwrt-passwall-packages.git;main" >> feeds.conf.default
         echo "src-git passwall https://github.com/xiaorouji/openwrt-passwall.git;main" >> feeds.conf.default
         
         ./scripts/feeds update -a
         ./scripts/feeds install -a
 
-    # 4. 生成配置 (防火墙全开 + 硬件加速 + 关闭UPX)
+    # =========================================================
+    # 4. 生成配置 (砍掉Xray + 防火墙全开 + 硬件加速)
+    # =========================================================
     - name: Generate Config
       run: |
         cd openwrt
         
-        # 机型 AX6000
+        # --- 1. 机型设置 (AX6000) ---
         echo "CONFIG_TARGET_mediatek=y" > .config
         echo "CONFIG_TARGET_mediatek_filogic=y" >> .config
         echo "CONFIG_TARGET_mediatek_filogic_DEVICE_xiaomi_redmi-router-ax6000=y" >> .config
         
-        # Passwall
+        # --- 2. 插件设置 (Sing-Box ONLY) ---
         echo "CONFIG_PACKAGE_luci-app-passwall=y" >> .config
         echo "CONFIG_PACKAGE_luci-app-passwall_INCLUDE_ChinaDNS_NG=y" >> .config
-        echo "CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Xray=y" >> .config
         echo "CONFIG_PACKAGE_luci-app-passwall_INCLUDE_SingBox=y" >> .config
         echo "CONFIG_PACKAGE_sing-box=y" >> .config
         echo "CONFIG_PACKAGE_luci-i18n-passwall-zh-cn=y" >> .config
         
-        # 关键：关闭 UPX 压缩 (极大降低内存消耗)
-        echo "# CONFIG_PACKAGE_xray-core_COMPRESS_UPX is not set" >> .config
-        echo "# CONFIG_PACKAGE_sing-box_COMPRESS_UPX is not set" >> .config
+        # --- 3. 关键：明确禁用 Xray (防报错) ---
+        echo "# CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Xray is not set" >> .config
+        echo "# CONFIG_PACKAGE_xray-core is not set" >> .config
         
-        # 性能 & Go
+        # --- 4. 性能优化 ---
+        # 关闭 UPX 压缩 (防止内存溢出)
+        echo "# CONFIG_PACKAGE_sing-box_COMPRESS_UPX is not set" >> .config
+        # 开启硬件加速 (千兆必备)
         echo "CONFIG_PACKAGE_kmod-nft-offload=y" >> .config
         echo "CONFIG_LUCI_LANG_zh_Hans=y" >> .config
+        # 强制使用外部 Go
         echo "CONFIG_GOLANG_EXTERNAL_BOOTSTRAP_ROOT=\"\"" >> .config
 
-        # 系统设置
+        # --- 5. 个性化设置 ---
+        # 修改 IP
         sed -i 's/192.168.1.1/192.168.8.1/g' package/base-files/files/bin/config_generate
         
+        # 创建启动脚本
         mkdir -p package/base-files/files/etc/uci-defaults
         cat <<EOF > package/base-files/files/etc/uci-defaults/99-custom-settings
         #!/bin/sh
+        
+        # 密码
         echo -e "851129\n851129" | passwd root
+        
         uci -q batch <<EOT
+        # 拨号
         set network.wan.proto='pppoe'
         set network.wan.username='637143646974'
         set network.wan.password='888888'
+        
+        # 硬件加速 (尝试自动开启)
         set firewall.defaults.flow_offloading='1'
         set firewall.defaults.flow_offloading_hw='1'
+        
+        # WiFi
         set wireless.default_radio0.ssid='OpenWrt_2.4G'
         set wireless.default_radio0.key='19851129z'
         set wireless.default_radio0.encryption='psk2'
         set wireless.default_radio1.ssid='OpenWrt_5G'
         set wireless.default_radio1.key='19851129z'
         set wireless.default_radio1.encryption='psk2'
+        
+        # 【防火墙全开】WAN口入站策略设为 ACCEPT
+        # 方便 S-UI 节点反代或其他外网访问
         set firewall.@zone[1].input='ACCEPT'
         set firewall.@zone[1].forward='REJECT'
+        
         commit network
         commit wireless
         commit firewall
@@ -146,23 +174,14 @@ jobs:
         make download -j8 || make download -j1 V=s
 
     # =========================================================
-    # 5. 【杀手锏】先单独编译最难啃的 Xray (单线程)
+    # 5. 编译 (多线程跑，Sing-Box 单独编译也不怕，内存管够)
     # =========================================================
-    - name: Compile Xray First
-      run: |
-        cd openwrt
-        echo "Pre-compiling Xray-core (Single Thread)..."
-        # 专门针对 xray-core 进行单线程编译，确保内存够用
-        make package/feeds/passwall_packages/xray-core/compile -j1 V=s || exit 1
-        echo "Xray compiled successfully!"
-
-    # 6. 再编译剩下的固件
     - name: Compile Firmware
       id: compile
       run: |
         cd openwrt
-        echo "Compiling firmware..."
-        # 主程序多线程跑，如果还错就单线程兜底
+        echo "Starting compilation..."
+        # 忽略非致命错误，确保拿到固件
         make -j$(nproc) || make -j1 V=s IGNORE_ERRORS=1
         echo "status=success" >> $GITHUB_OUTPUT
 
