@@ -1,4 +1,4 @@
-name: AX6000 Passwall (Final Ultimate)
+name: AX6000 Passwall (Fixed Hanwckf)
 
 on:
   workflow_dispatch:
@@ -13,7 +13,7 @@ jobs:
     runs-on: ubuntu-22.04
     
     steps:
-    - name: Checkout Your Repo
+    - name: Checkout
       uses: actions/checkout@v3
 
     - name: Prepare Environment
@@ -28,14 +28,11 @@ jobs:
         git config --global user.email "action@github.com"
         git config --global user.name "GitHub Action"
 
-    # --- 核心修复：使用官方插件拉取 OpenWrt 源码 ---
-    # 这比 git clone 命令更稳定，不会报错 128
-    - name: Clone OpenWrt Source
-      uses: actions/checkout@v3
-      with:
-        repository: hanwckf/immortalwrt-mt7986
-        path: openwrt
-        ref: master
+    - name: Clone Source Code (Correct URL)
+      run: |
+        # --- 修正：使用正确的 hanwckf/immortalwrt-mt798x 仓库 ---
+        echo "Cloning hanwckf/immortalwrt-mt798x..."
+        git clone https://github.com/hanwckf/immortalwrt-mt798x.git -b master openwrt
 
     - name: Add Passwall Feeds
       run: |
@@ -49,7 +46,7 @@ jobs:
       run: |
         cd openwrt
         
-        # 1. 载入 AX6000 默认配置
+        # 1. 载入 AX6000 默认配置 (路径保持不变)
         cp defconfig/mt7986-ax6000.config .config
         
         # 2. 开启 Passwall
@@ -59,31 +56,31 @@ jobs:
         echo "CONFIG_PACKAGE_luci-app-passwall_INCLUDE_SingBox=y" >> .config
         echo "CONFIG_PACKAGE_luci-i18n-passwall-zh-cn=y" >> .config
 
-        # 3. --- 个性化设置 (IP/密码/拨号/WiFi) ---
+        # 3. --- 个性化设置 ---
         
-        # 修改 A: 默认 IP 改为 192.168.8.1
+        # 修改默认 IP 为 192.168.8.1
         sed -i 's/192.168.1.1/192.168.8.1/g' package/base-files/files/bin/config_generate
         
-        # 修改 B: 生成首次启动脚本
+        # 生成首次启动脚本 (密码/PPPoE/WiFi)
         mkdir -p package/base-files/files/etc/uci-defaults
         cat <<EOF > package/base-files/files/etc/uci-defaults/99-custom-settings
         #!/bin/sh
         
-        # 1. 修改 root 密码 (851129)
+        # 修改 root 密码 (851129)
         echo -e "851129\n851129" | passwd root
         
         uci -q batch <<EOT
-        # 2. 设置 PPPoE 拨号
+        # 设置 PPPoE
         set network.wan.proto='pppoe'
         set network.wan.username='637143646974'
         set network.wan.password='888888'
         
-        # 3. 设置 WiFi (2.4G)
+        # 设置 WiFi (2.4G)
         set wireless.default_radio0.ssid='OpenWrt_2.4G'
         set wireless.default_radio0.key='19851129z'
         set wireless.default_radio0.encryption='psk2'
         
-        # 4. 设置 WiFi (5G)
+        # 设置 WiFi (5G)
         set wireless.default_radio1.ssid='OpenWrt_5G'
         set wireless.default_radio1.key='19851129z'
         set wireless.default_radio1.encryption='psk2'
@@ -95,7 +92,7 @@ jobs:
         exit 0
         EOF
         
-        # 4. 生成最终配置
+        # 4. 生成配置
         make defconfig
 
     - name: Download Packages
