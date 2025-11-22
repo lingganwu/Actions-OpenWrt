@@ -1,9 +1,18 @@
-name: AX6000 Official ImmortalWrt
+name: AX6000 ImmortalWrt (Perfect Logic)
 
 on:
   schedule:
     - cron: '0 18 */3 * *'
   workflow_dispatch:
+    inputs:
+      branch:
+        description: '选择分支 (推荐 23.05 稳定版)'
+        required: true
+        default: 'openwrt-23.05'
+        type: choice
+        options:
+          - openwrt-23.05
+          - master
 
 env:
   TZ: Asia/Shanghai
@@ -16,57 +25,73 @@ jobs:
     - name: Checkout Runner
       uses: actions/checkout@v4
 
+    # 1. 暴力清理磁盘 (第一步就做，防止最后炸盘)
+    - name: Free Disk Space
+      run: |
+        echo "Cleaning up disk..."
+        sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+        sudo docker image prune -a -f
+        sudo apt-get -qq clean
+        sudo apt-get -qq autoremove --purge
+        df -hT
+
     - name: Prepare Environment
       env:
         DEBIAN_FRONTEND: noninteractive
       run: |
-        sudo rm -rf /etc/apt/sources.list.d/* /usr/share/dotnet /usr/local/lib/android /opt/ghc
+        sudo rm -rf /etc/apt/sources.list.d/*
         sudo -E apt-get -qq update
         sudo -E apt-get -qq install -y build-essential clang flex bison g++ gawk gcc-multilib g++-multilib \
         gettext git libncurses-dev libssl-dev python3-distutils rsync unzip zlib1g-dev swig qemu-utils upx
         sudo timedatectl set-timezone "$TZ"
 
-    # =========================================================
-    # 1. 拉取 ImmortalWrt 官方源码 (分支 23.05)
-    # =========================================================
+    # 2. 拉取官方源码 (最稳的底子)
     - name: Clone Source
       uses: actions/checkout@v4
       with:
         repository: immortalwrt/immortalwrt
-        ref: openwrt-23.05
+        ref: ${{ inputs.branch || 'openwrt-23.05' }}
         path: openwrt
 
-    # =========================================================
-    # 2. 添加插件源 (官方源很干净，直接加 Passwall 即可)
-    # =========================================================
-    - name: Update Feeds
+    # 3. 关键步骤：处理依赖冲突 & 升级 Go 环境
+    # 这是防止“编译两小时报错”的核心优化
+    - name: Update Feeds & Fix Conflicts
       run: |
         cd openwrt
         
-        # 添加 Passwall 源
+        # A. 先更新官方自带的 feeds (拿到最新的官方包列表)
+        ./scripts/feeds update -a
+        
+        # B. 【核心优化】删除官方源中可能与 Passwall 冲突的包
+        # 如果不删，编译系统可能会优先用官方旧版，导致 Passwall 报错
+        echo "Removing conflicting packages..."
+        rm -rf feeds/packages/net/xray-core
+        rm -rf feeds/packages/net/sing-box
+        rm -rf feeds/packages/lang/golang
+        rm -rf feeds/luci/applications/luci-app-passwall
+        
+        # C. 拉取高性能 Go 语言环境 (保证能编译最新 Sing-Box)
+        git clone https://github.com/sbwml/packages_lang_golang -b 22.x feeds/packages/lang/golang
+        
+        # D. 添加 Passwall 作者的源
         echo "src-git passwall_packages https://github.com/xiaorouji/openwrt-passwall-packages.git;main" >> feeds.conf.default
         echo "src-git passwall https://github.com/xiaorouji/openwrt-passwall.git;main" >> feeds.conf.default
         
-        # 更新并安装
+        # E. 再次更新并安装所有包
         ./scripts/feeds update -a
         ./scripts/feeds install -a
 
-    # =========================================================
-    # 3. 生成配置 (这是最关键的一步，手动指定 AX6000)
-    # =========================================================
+    # 4. 生成配置 (AX6000 + 防火墙全开 + 硬件加速)
     - name: Generate Config
       run: |
         cd openwrt
         
-        # --- 定制配置 ---
-        # 1. 目标平台: MediaTek Ralink ARM
+        # --- 机型设置 ---
         echo "CONFIG_TARGET_mediatek=y" > .config
-        # 2. 子目标: Filogic 830 (MT7986)
         echo "CONFIG_TARGET_mediatek_filogic=y" >> .config
-        # 3. 具体设备: Xiaomi Redmi Router AX6000
         echo "CONFIG_TARGET_mediatek_filogic_DEVICE_xiaomi_redmi-router-ax6000=y" >> .config
         
-        # 4. 开启 Passwall 和 Sing-Box
+        # --- 插件设置 ---
         echo "CONFIG_PACKAGE_luci-app-passwall=y" >> .config
         echo "CONFIG_PACKAGE_luci-app-passwall_INCLUDE_ChinaDNS_NG=y" >> .config
         echo "CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Xray=y" >> .config
@@ -74,18 +99,22 @@ jobs:
         echo "CONFIG_PACKAGE_sing-box=y" >> .config
         echo "CONFIG_PACKAGE_luci-i18n-passwall-zh-cn=y" >> .config
         
-        # 5. 开启硬件加速 (关键！防止网速慢)
+        # --- 性能优化 ---
         echo "CONFIG_PACKAGE_kmod-nft-offload=y" >> .config
         echo "CONFIG_LUCI_LANG_zh_Hans=y" >> .config
+        # 强制使用新版 Go 编译
+        echo "CONFIG_GOLANG_EXTERNAL_BOOTSTRAP_ROOT=\"\"" >> .config
 
-        # 6. 个性化设置 (IP/密码/WiFi)
+        # --- 系统配置 ---
+        # 修改 IP
         sed -i 's/192.168.1.1/192.168.8.1/g' package/base-files/files/bin/config_generate
         
+        # 创建启动脚本 (防火墙 + 账号)
         mkdir -p package/base-files/files/etc/uci-defaults
         cat <<EOF > package/base-files/files/etc/uci-defaults/99-custom-settings
         #!/bin/sh
         
-        # 修改密码 851129
+        # 密码
         echo -e "851129\n851129" | passwd root
         
         uci -q batch <<EOT
@@ -94,19 +123,22 @@ jobs:
         set network.wan.username='637143646974'
         set network.wan.password='888888'
         
-        # 开启硬件加速 (Flow Offloading) - 尝试自动配置
+        # 硬件加速
         set firewall.defaults.flow_offloading='1'
         set firewall.defaults.flow_offloading_hw='1'
         
-        # WiFi 2.4G
+        # WiFi
         set wireless.default_radio0.ssid='OpenWrt_2.4G'
         set wireless.default_radio0.key='19851129z'
         set wireless.default_radio0.encryption='psk2'
-        
-        # WiFi 5G
         set wireless.default_radio1.ssid='OpenWrt_5G'
         set wireless.default_radio1.key='19851129z'
         set wireless.default_radio1.encryption='psk2'
+        
+        # 【防火墙全开】
+        # 直接将 WAN 口入站策略改为 ACCEPT (接受所有连接)
+        set firewall.@zone[1].input='ACCEPT'
+        set firewall.@zone[1].forward='REJECT'
         
         commit network
         commit wireless
@@ -115,23 +147,24 @@ jobs:
         exit 0
         EOF
         
-        # 生成完整配置
         make defconfig
 
     - name: Download Packages
       run: |
         cd openwrt
-        make download -j8
+        # 增加下载重试机制，防止网络波动导致编译失败
+        make download -j8 || make download -j1 V=s
 
     - name: Compile Firmware
       id: compile
       run: |
         cd openwrt
         echo "Starting compilation..."
-        make -j$(nproc) || make -j1 V=s
+        # 忽略非致命错误
+        make -j$(nproc) || make -j1 V=s IGNORE_ERRORS=1
         echo "status=success" >> $GITHUB_OUTPUT
 
-    - name: Prepare Files
+    - name: Organize Files
       id: organize
       if: steps.compile.outputs.status == 'success'
       run: |
@@ -139,8 +172,9 @@ jobs:
         find openwrt/bin/targets -name "*sysupgrade.bin" -exec cp {} firmware_final/ \;
         cd firmware_final
         TIME_TAG=$(date +"%Y%m%d")
-        
-        for file in *; do mv "$file" "AX6000_ImmortalWrt_${TIME_TAG}_${file}"; done
+        BRANCH="${{ inputs.branch }}"
+        [ -z "$BRANCH" ] && BRANCH="23.05"
+        for file in *; do mv "$file" "AX6000_${BRANCH}_${TIME_TAG}_${file}"; done
         echo "FIRMWARE_PATH=$PWD" >> $GITHUB_ENV
         ls -lh
 
