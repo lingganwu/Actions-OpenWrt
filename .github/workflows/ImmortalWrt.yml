@@ -1,4 +1,4 @@
-name: AX6000 Official (Standard Clean Build)
+name: AX6000 Final (Surgical Go Fix)
 
 on:
   schedule:
@@ -25,9 +25,7 @@ jobs:
     - name: Checkout Runner
       uses: actions/checkout@v4
 
-    # =========================================================
-    # 1. 基础保障：清理磁盘 + 8G Swap
-    # =========================================================
+    # 1. 基础保障：清理磁盘 + 8G Swap (防爆内存/爆盘)
     - name: Free Space & Create 8G Swap
       run: |
         echo "Cleaning disk..."
@@ -53,9 +51,7 @@ jobs:
         gettext git libncurses-dev libssl-dev python3-distutils rsync unzip zlib1g-dev swig qemu-utils upx
         sudo timedatectl set-timezone "$TZ"
 
-    # =========================================================
     # 2. 拉取官方源码
-    # =========================================================
     - name: Clone Source
       uses: actions/checkout@v4
       with:
@@ -64,31 +60,38 @@ jobs:
         path: openwrt
 
     # =========================================================
-    # 3. 标准化处理 Feeds (最不容易出错的方式)
+    # 3. 手术刀式替换 Go 环境 (解决 Sing-Box 编译失败的唯一解)
     # =========================================================
-    - name: Update Feeds & Install Passwall
+    - name: Update Feeds & Replace Go
       run: |
         cd openwrt
         
-        # A. 添加 Passwall 源到配置文件的第一行 (优先级最高)
-        # 使用 sed 插入到顶部，确保优先使用 Passwall 的包
-        sed -i '1i src-git passwall_packages https://github.com/xiaorouji/openwrt-passwall-packages.git;main' feeds.conf.default
-        sed -i '2i src-git passwall https://github.com/xiaorouji/openwrt-passwall.git;main' feeds.conf.default
-        
-        # B. 更新所有源
+        # A. 先更新官方源，下载索引
         ./scripts/feeds update -a
         
-        # C. 【关键】删除官方源里版本过旧的 Sing-Box 和 Xray
-        # 这样安装时，系统会自动采用 Passwall 源里的新版本
+        # B. 【核心操作】删除官方旧版 Go
+        echo "Replacing Golang..."
+        rm -rf feeds/packages/lang/golang
+        
+        # C. 【核心操作】克隆 sbwml 的高性能新版 Go (22.x) 到原位置
+        git clone https://github.com/sbwml/packages_lang_golang -b 22.x feeds/packages/lang/golang
+        
+        # D. 添加 Passwall 源
+        echo "src-git passwall_packages https://github.com/xiaorouji/openwrt-passwall-packages.git;main" >> feeds.conf.default
+        echo "src-git passwall https://github.com/xiaorouji/openwrt-passwall.git;main" >> feeds.conf.default
+        
+        # E. 更新源
+        ./scripts/feeds update -a
+        
+        # F. 删除官方源里的 Sing-Box (防止冲突，强制用 Passwall 的)
         rm -rf feeds/packages/net/sing-box
         rm -rf feeds/packages/net/xray-core
         
-        # D. 安装所有包
+        # G. 【关键顺序】先安装 Go，再安装其他
+        ./scripts/feeds install -a -p golang
         ./scripts/feeds install -a
 
-    # =========================================================
     # 4. 生成配置 (砍掉 Xray，保留 Sing-Box)
-    # =========================================================
     - name: Generate Config
       run: |
         cd openwrt
@@ -105,7 +108,7 @@ jobs:
         echo "CONFIG_PACKAGE_sing-box=y" >> .config
         echo "CONFIG_PACKAGE_luci-i18n-passwall-zh-cn=y" >> .config
         
-        # 禁用 Xray (节省资源，避免报错)
+        # 禁用 Xray (不编译它，节省资源，避免报错)
         echo "# CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Xray is not set" >> .config
         echo "# CONFIG_PACKAGE_xray-core is not set" >> .config
         
@@ -113,8 +116,10 @@ jobs:
         echo "# CONFIG_PACKAGE_sing-box_COMPRESS_UPX is not set" >> .config
         echo "CONFIG_PACKAGE_kmod-nft-offload=y" >> .config
         echo "CONFIG_LUCI_LANG_zh_Hans=y" >> .config
+        # 强制使用新版 Go
+        echo "CONFIG_GOLANG_EXTERNAL_BOOTSTRAP_ROOT=\"\"" >> .config
 
-        # 个性化设置 (IP/密码/防火墙)
+        # 个性化设置 (IP/密码/防火墙全开)
         sed -i 's/192.168.1.1/192.168.8.1/g' package/base-files/files/bin/config_generate
         
         mkdir -p package/base-files/files/etc/uci-defaults
@@ -133,11 +138,9 @@ jobs:
         set wireless.default_radio1.ssid='OpenWrt_5G'
         set wireless.default_radio1.key='19851129z'
         set wireless.default_radio1.encryption='psk2'
-        
-        # 防火墙 WAN 口全开
+        # 防火墙全开
         set firewall.@zone[1].input='ACCEPT'
         set firewall.@zone[1].forward='REJECT'
-        
         commit network
         commit wireless
         commit firewall
@@ -152,14 +155,12 @@ jobs:
         cd openwrt
         make download -j8 || make download -j1 V=s
 
-    # =========================================================
-    # 5. 编译 (Sing-Box 还是单独跑一下比较稳)
-    # =========================================================
+    # 5. 单独编译 Sing-Box (必须单线程，否则必炸)
     - name: Compile Sing-Box First
       run: |
         cd openwrt
-        echo "Pre-compiling Sing-Box..."
-        # 尝试单线程编译 sing-box，如果这里失败，说明依赖真的有问题，但官方源通常没问题
+        echo "Compiling Sing-Box (Single Thread)..."
+        # 这里的路径必须精确
         make package/feeds/passwall_packages/sing-box/compile -j1 V=s || exit 1
 
     - name: Compile Firmware
