@@ -1,4 +1,4 @@
-name: AX6000 Pure System (Final Fix)
+name: RedMi-AX6000-OpenWrt-build
 
 on:
   schedule:
@@ -59,88 +59,81 @@ jobs:
         ./scripts/feeds update -a
         ./scripts/feeds install -a
 
-    # 4. 生成配置 (修复版：使用 echo 写入，杜绝缩进错误)
+    # 4. 生成配置 (严格模式：使用 echo 单行写入，防止 YAML 缩进错误)
     - name: Generate Config
       run: |
         cd openwrt
-        
-        # --- A. 清除旧配置 ---
         rm -f .config
         
-        # --- B. 写入核心机型配置 (使用 echo 避免格式错误) ---
-        echo "CONFIG_TARGET_mediatek=y" > .config
+        # --- A. 锁定机型 (Redmi AX6000) ---
+        echo "CONFIG_TARGET_mediatek=y" >> .config
         echo "CONFIG_TARGET_mediatek_filogic=y" >> .config
         echo "CONFIG_TARGET_mediatek_filogic_DEVICE_xiaomi_redmi-router-ax6000=y" >> .config
         
-        # 锁定机型
-        make defconfig
-        
-        # --- C. 防错检查 ---
-        # 检查 .config 是否真的包含了 AX6000，如果 grep 找不到，说明配置失败，脚本会停止并打印 .config 内容供排查
-        grep -q "CONFIG_TARGET_mediatek_filogic_DEVICE_xiaomi_redmi-router-ax6000=y" .config || { 
-          echo "❌ 错误：机型配置未生效，请检查代码！以下是生成的 .config 内容："; 
-          cat .config; 
-          exit 1; 
-        }
-        
-        # --- D. 写入软件包和优化 ---
+        # --- B. 必备工具 (curl/wget/ca) ---
         echo "CONFIG_PACKAGE_curl=y" >> .config
         echo "CONFIG_PACKAGE_wget-ssl=y" >> .config
         echo "CONFIG_PACKAGE_ca-bundle=y" >> .config
         echo "CONFIG_PACKAGE_ca-certificates=y" >> .config
         echo "CONFIG_PACKAGE_libustream-openssl=y" >> .config
         echo "CONFIG_PACKAGE_openssl-util=y" >> .config
+        
+        # --- C. 性能优化 (硬件加速 + 负载均衡) ---
         echo "CONFIG_PACKAGE_kmod-nft-offload=y" >> .config
         echo "CONFIG_PACKAGE_irqbalance=y" >> .config
         echo "CONFIG_LUCI_LANG_zh_Hans=y" >> .config
+        
+        # 生成默认配置
+        make defconfig
+        
+        # 防错检查：确认机型已选中
+        grep -q "CONFIG_TARGET_mediatek_filogic_DEVICE_xiaomi_redmi-router-ax6000=y" .config || exit 1
 
-        # --- E. 个性化脚本 (IP/密码/WiFi/PPPoE/防火墙) ---
+        # --- D. 个性化设置 (IP/密码/防火墙) ---
+        # 修改默认 IP
         sed -i 's/192.168.1.1/192.168.8.1/g' package/base-files/files/bin/config_generate
         
+        # 创建启动脚本
         mkdir -p package/base-files/files/etc/uci-defaults
-        cat <<EOF > package/base-files/files/etc/uci-defaults/99-custom-settings
-        #!/bin/sh
         
-        # 密码 851129
-        echo -e "851129\n851129" | passwd root
+        # 定义脚本路径
+        FILE="package/base-files/files/etc/uci-defaults/99-custom-settings"
         
-        uci -q batch <<EOT
-        # 拨号
-        set network.wan.proto='pppoe'
-        set network.wan.username='637143646974'
-        set network.wan.password='888888'
+        # 使用 echo 逐行写入，绝对稳健
+        echo "#!/bin/sh" > $FILE
+        echo "echo -e '851129\n851129' | passwd root" >> $FILE
+        
+        # 拨号设置
+        echo "uci set network.wan.proto='pppoe'" >> $FILE
+        echo "uci set network.wan.username='637143646974'" >> $FILE
+        echo "uci set network.wan.password='888888'" >> $FILE
         
         # 硬件加速
-        set firewall.defaults.flow_offloading='1'
-        set firewall.defaults.flow_offloading_hw='1'
+        echo "uci set firewall.defaults.flow_offloading='1'" >> $FILE
+        echo "uci set firewall.defaults.flow_offloading_hw='1'" >> $FILE
         
-        # WiFi
-        set wireless.default_radio0.ssid='OpenWrt_2.4G'
-        set wireless.default_radio0.key='19851129z'
-        set wireless.default_radio0.encryption='psk2'
-        set wireless.default_radio1.ssid='OpenWrt_5G'
-        set wireless.default_radio1.key='19851129z'
-        set wireless.default_radio1.encryption='psk2'
-        set wireless.radio0.country='AU'
-        set wireless.radio1.country='AU'
+        # WiFi 设置
+        echo "uci set wireless.default_radio0.ssid='OpenWrt_2.4G'" >> $FILE
+        echo "uci set wireless.default_radio0.key='19851129z'" >> $FILE
+        echo "uci set wireless.default_radio0.encryption='psk2'" >> $FILE
+        echo "uci set wireless.default_radio1.ssid='OpenWrt_5G'" >> $FILE
+        echo "uci set wireless.default_radio1.key='19851129z'" >> $FILE
+        echo "uci set wireless.default_radio1.encryption='psk2'" >> $FILE
+        echo "uci set wireless.radio0.country='AU'" >> $FILE
+        echo "uci set wireless.radio1.country='AU'" >> $FILE
         
-        # 防火墙 WAN 口全开
-        set firewall.@zone[1].input='ACCEPT'
-        set firewall.@zone[1].forward='REJECT'
+        # 防火墙全开 (WAN口入站接受)
+        echo "uci set firewall.@zone[1].input='ACCEPT'" >> $FILE
+        echo "uci set firewall.@zone[1].forward='REJECT'" >> $FILE
         
-        commit network
-        commit wireless
-        commit firewall
-        EOT
+        # 提交更改
+        echo "uci commit network" >> $FILE
+        echo "uci commit wireless" >> $FILE
+        echo "uci commit firewall" >> $FILE
         
-        /etc/init.d/irqbalance enable
-        /etc/init.d/irqbalance start
-        
-        exit 0
-        EOF
-        
-        # 应用所有配置
-        make defconfig
+        # 启动 irqbalance
+        echo "/etc/init.d/irqbalance enable" >> $FILE
+        echo "exit 0" >> $FILE
 
     - name: Download Packages
       run: |
@@ -166,20 +159,18 @@ jobs:
         TIME_TAG=$(date +"%Y%m%d")
         BRANCH="${{ inputs.branch }}"
         [ -z "$BRANCH" ] && BRANCH="23.05"
-        for file in *; do mv "$file" "AX6000_Pure_${BRANCH}_${TIME_TAG}_${file}"; done
+        # 文件名格式：RedMi-AX6000-OpenWrt-build_日期.bin
+        for file in *; do mv "$file" "RedMi-AX6000-OpenWrt-build_${BRANCH}_${TIME_TAG}.bin"; done
         echo "FIRMWARE_PATH=$PWD" >> $GITHUB_ENV
         ls -lh
 
-    # 6. 上传 (使用官方 Rclone 命令行)
+    # 6. 上传 (官方 Rclone)
     - name: Upload to OneDrive
       if: steps.compile.outputs.status == 'success' && env.RCLONE_CONF != ''
       run: |
-        # 安装
         sudo -v ; curl https://rclone.org/install.sh | sudo bash
-        # 配置
         mkdir -p ~/.config/rclone
         echo "${{ secrets.RCLONE_CONF }}" > ~/.config/rclone/rclone.conf
-        # 上传
         echo "Uploading..."
         rclone copy ${{ env.FIRMWARE_PATH }} onedrive:/OpenWrt_Builds/
         echo "Upload success!"
