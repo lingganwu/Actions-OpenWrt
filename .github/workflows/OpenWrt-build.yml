@@ -1,4 +1,4 @@
-name: AX6000 Pure System (Base for Manual Install)
+name: AX6000 Pure System (Fix OneDrive Upload)
 
 on:
   schedule:
@@ -25,7 +25,7 @@ jobs:
     - name: Checkout Runner
       uses: actions/checkout@v4
 
-    # 1. 基础清理 (虽然编译纯净版不太占空间，但为了保险还是清一下)
+    # 1. 基础清理
     - name: Free Disk Space
       run: |
         echo "Cleaning disk..."
@@ -44,7 +44,7 @@ jobs:
         gettext git libncurses-dev libssl-dev python3-distutils rsync unzip zlib1g-dev swig qemu-utils upx
         sudo timedatectl set-timezone "$TZ"
 
-    # 2. 拉取官方源码 (最纯净)
+    # 2. 拉取官方源码
     - name: Clone Source
       uses: actions/checkout@v4
       with:
@@ -52,14 +52,14 @@ jobs:
         ref: ${{ inputs.branch || 'openwrt-23.05' }}
         path: openwrt
 
-    # 3. 更新基础源 (只装系统必须的)
+    # 3. 更新基础源
     - name: Update Feeds
       run: |
         cd openwrt
         ./scripts/feeds update -a
         ./scripts/feeds install -a
 
-    # 4. 生成配置 (AX6000 + 必备工具 + 性能优化)
+    # 4. 生成配置
     - name: Generate Config
       run: |
         cd openwrt
@@ -69,8 +69,7 @@ jobs:
         echo "CONFIG_TARGET_mediatek_filogic=y" >> .config
         echo "CONFIG_TARGET_mediatek_filogic_DEVICE_xiaomi_redmi-router-ax6000=y" >> .config
         
-        # --- 必备工具 (方便你后续手动安装插件) ---
-        # 只有装了这些，你才能在 SSH 里用 wget 下载插件，或者用 opkg 安装 https 源
+        # --- 必备工具 ---
         echo "CONFIG_PACKAGE_curl=y" >> .config
         echo "CONFIG_PACKAGE_wget-ssl=y" >> .config
         echo "CONFIG_PACKAGE_ca-bundle=y" >> .config
@@ -83,14 +82,14 @@ jobs:
         echo "CONFIG_PACKAGE_irqbalance=y" >> .config
         echo "CONFIG_LUCI_LANG_zh_Hans=y" >> .config
 
-        # --- 个性化 (IP/密码/防火墙全开) ---
+        # --- 个性化 ---
         sed -i 's/192.168.1.1/192.168.8.1/g' package/base-files/files/bin/config_generate
         
         mkdir -p package/base-files/files/etc/uci-defaults
         cat <<EOF > package/base-files/files/etc/uci-defaults/99-custom-settings
         #!/bin/sh
         
-        # 密码 851129
+        # 密码
         echo -e "851129\n851129" | passwd root
         
         uci -q batch <<EOT
@@ -99,11 +98,11 @@ jobs:
         set network.wan.username='637143646974'
         set network.wan.password='888888'
         
-        # 开启硬件加速
+        # 硬件加速
         set firewall.defaults.flow_offloading='1'
         set firewall.defaults.flow_offloading_hw='1'
         
-        # WiFi 设置
+        # WiFi
         set wireless.default_radio0.ssid='OpenWrt_2.4G'
         set wireless.default_radio0.key='19851129z'
         set wireless.default_radio0.encryption='psk2'
@@ -113,7 +112,7 @@ jobs:
         set wireless.radio0.country='AU'
         set wireless.radio1.country='AU'
         
-        # 防火墙 WAN 口全开
+        # 防火墙全开
         set firewall.@zone[1].input='ACCEPT'
         set firewall.@zone[1].forward='REJECT'
         
@@ -135,7 +134,6 @@ jobs:
         cd openwrt
         make download -j8
 
-    # 5. 编译 (这次肯定飞快且成功)
     - name: Compile Firmware
       id: compile
       run: |
@@ -158,13 +156,23 @@ jobs:
         echo "FIRMWARE_PATH=$PWD" >> $GITHUB_ENV
         ls -lh
 
+    # =========================================================
+    # 修复：弃用 wei/rclone，改用官方命令行直连 (稳定不报错)
+    # =========================================================
     - name: Upload to OneDrive
-      if: steps.compile.outputs.status == 'success' && env.RCLONE_CONF != ''
-      uses: wei/rclone@v1
-      env:
-        RCLONE_CONF: ${{ secrets.RCLONE_CONF }}
-      with:
-        args: copy ${{ env.FIRMWARE_PATH }} onedrive:/OpenWrt_Builds/
+      if: steps.compile.outputs.status == 'success'
+      run: |
+        # 1. 安装官方 Rclone
+        sudo -v ; curl https://rclone.org/install.sh | sudo bash
+        
+        # 2. 配置 Rclone (写入你的 Secret)
+        mkdir -p ~/.config/rclone
+        echo "${{ secrets.RCLONE_CONF }}" > ~/.config/rclone/rclone.conf
+        
+        # 3. 执行上传
+        echo "Uploading to OneDrive..."
+        rclone copy ${{ env.FIRMWARE_PATH }} onedrive:/OpenWrt_Builds/
+        echo "Upload success!"
 
     - name: Upload to GitHub Release
       uses: softprops/action-gh-release@v1
