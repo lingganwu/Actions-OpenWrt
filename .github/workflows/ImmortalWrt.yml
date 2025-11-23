@@ -1,4 +1,4 @@
-name: AX6000 Final (Surgical Go Fix)
+name: AX6000 Official OpenWrt (Optimized)
 
 on:
   schedule:
@@ -25,7 +25,9 @@ jobs:
     - name: Checkout Runner
       uses: actions/checkout@v4
 
-    # 1. 基础保障：清理磁盘 + 8G Swap (防爆内存/爆盘)
+    # =========================================================
+    # 1. 基础保障：清理磁盘 + 8G Swap (防爆内存)
+    # =========================================================
     - name: Free Space & Create 8G Swap
       run: |
         echo "Cleaning disk..."
@@ -51,100 +53,127 @@ jobs:
         gettext git libncurses-dev libssl-dev python3-distutils rsync unzip zlib1g-dev swig qemu-utils upx
         sudo timedatectl set-timezone "$TZ"
 
-    # 2. 拉取官方源码
+    # =========================================================
+    # 2. 拉取 OpenWrt 官方源码
+    # =========================================================
     - name: Clone Source
       uses: actions/checkout@v4
       with:
-        repository: immortalwrt/immortalwrt
+        repository: openwrt/openwrt
         ref: ${{ inputs.branch || 'openwrt-23.05' }}
         path: openwrt
 
     # =========================================================
-    # 3. 手术刀式替换 Go 环境 (解决 Sing-Box 编译失败的唯一解)
+    # 3. 配置软件源 (引入 sbwml 大神源解决 Sing-Box 问题)
     # =========================================================
-    - name: Update Feeds & Replace Go
+    - name: Configure Feeds
       run: |
         cd openwrt
         
-        # A. 先更新官方源，下载索引
-        ./scripts/feeds update -a
+        # A. 【核心】添加 sbwml 源到第一行 (优先级最高)
+        # 这个源自带了最新的 Go 和 Sing-Box，会自动覆盖官方旧版
+        sed -i '1i src-git sbwml https://github.com/sbwml/openwrt_pkgs.git;v2_core' feeds.conf.default
         
-        # B. 【核心操作】删除官方旧版 Go
-        echo "Replacing Golang..."
-        rm -rf feeds/packages/lang/golang
-        
-        # C. 【核心操作】克隆 sbwml 的高性能新版 Go (22.x) 到原位置
-        git clone https://github.com/sbwml/packages_lang_golang -b 22.x feeds/packages/lang/golang
-        
-        # D. 添加 Passwall 源
+        # B. 添加 Passwall 源
         echo "src-git passwall_packages https://github.com/xiaorouji/openwrt-passwall-packages.git;main" >> feeds.conf.default
         echo "src-git passwall https://github.com/xiaorouji/openwrt-passwall.git;main" >> feeds.conf.default
         
-        # E. 更新源
+        # C. 更新源
         ./scripts/feeds update -a
         
-        # F. 删除官方源里的 Sing-Box (防止冲突，强制用 Passwall 的)
-        rm -rf feeds/packages/net/sing-box
-        rm -rf feeds/packages/net/xray-core
+        # D. 强制安装 sbwml 的关键包 (Go, Sing-Box, Irqbalance)
+        # 这步确保了我们用的是高性能版本，而不是官方旧版
+        ./scripts/feeds install -p sbwml golang
+        ./scripts/feeds install -p sbwml sing-box
+        ./scripts/feeds install -p sbwml irqbalance
         
-        # G. 【关键顺序】先安装 Go，再安装其他
-        ./scripts/feeds install -a -p golang
+        # E. 安装剩余所有包
         ./scripts/feeds install -a
 
-    # 4. 生成配置 (砍掉 Xray，保留 Sing-Box)
+    # =========================================================
+    # 4. 生成配置 (官方优化版)
+    # =========================================================
     - name: Generate Config
       run: |
         cd openwrt
         
-        # 机型 AX6000
+        # --- 1. 机型设置 (AX6000) ---
         echo "CONFIG_TARGET_mediatek=y" > .config
         echo "CONFIG_TARGET_mediatek_filogic=y" >> .config
         echo "CONFIG_TARGET_mediatek_filogic_DEVICE_xiaomi_redmi-router-ax6000=y" >> .config
         
-        # 插件: Passwall + SingBox
+        # --- 2. 插件设置 (只选 Sing-Box) ---
         echo "CONFIG_PACKAGE_luci-app-passwall=y" >> .config
         echo "CONFIG_PACKAGE_luci-app-passwall_INCLUDE_ChinaDNS_NG=y" >> .config
         echo "CONFIG_PACKAGE_luci-app-passwall_INCLUDE_SingBox=y" >> .config
         echo "CONFIG_PACKAGE_sing-box=y" >> .config
         echo "CONFIG_PACKAGE_luci-i18n-passwall-zh-cn=y" >> .config
         
-        # 禁用 Xray (不编译它，节省资源，避免报错)
+        # 禁用 Xray (官方源编译 Xray 极易失败，且你用不到)
         echo "# CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Xray is not set" >> .config
         echo "# CONFIG_PACKAGE_xray-core is not set" >> .config
         
-        # 性能设置 (关闭UPX + 硬件加速)
-        echo "# CONFIG_PACKAGE_sing-box_COMPRESS_UPX is not set" >> .config
+        # --- 3. 性能优化 (关键！) ---
+        # 开启硬件加速 (Flow Offloading)
         echo "CONFIG_PACKAGE_kmod-nft-offload=y" >> .config
-        echo "CONFIG_LUCI_LANG_zh_Hans=y" >> .config
+        # 开启多核负载均衡 (让4个核一起工作)
+        echo "CONFIG_PACKAGE_irqbalance=y" >> .config
         # 强制使用新版 Go
         echo "CONFIG_GOLANG_EXTERNAL_BOOTSTRAP_ROOT=\"\"" >> .config
+        # 关闭 UPX 压缩 (防内存报错)
+        echo "# CONFIG_PACKAGE_sing-box_COMPRESS_UPX is not set" >> .config
 
-        # 个性化设置 (IP/密码/防火墙全开)
+        # --- 4. 基础设置 ---
+        echo "CONFIG_LUCI_LANG_zh_Hans=y" >> .config
+        echo "CONFIG_PACKAGE_curl=y" >> .config
+        echo "CONFIG_PACKAGE_wget-ssl=y" >> .config
+
+        # --- 5. 系统文件修改 ---
+        # 修改 IP
         sed -i 's/192.168.1.1/192.168.8.1/g' package/base-files/files/bin/config_generate
         
+        # 启动脚本 (防火墙/WiFi/密码)
         mkdir -p package/base-files/files/etc/uci-defaults
         cat <<EOF > package/base-files/files/etc/uci-defaults/99-custom-settings
         #!/bin/sh
+        
+        # 密码
         echo -e "851129\n851129" | passwd root
+        
         uci -q batch <<EOT
+        # 拨号
         set network.wan.proto='pppoe'
         set network.wan.username='637143646974'
         set network.wan.password='888888'
+        
+        # 硬件加速 (千兆必备)
         set firewall.defaults.flow_offloading='1'
         set firewall.defaults.flow_offloading_hw='1'
+        
+        # WiFi
         set wireless.default_radio0.ssid='OpenWrt_2.4G'
         set wireless.default_radio0.key='19851129z'
         set wireless.default_radio0.encryption='psk2'
         set wireless.default_radio1.ssid='OpenWrt_5G'
         set wireless.default_radio1.key='19851129z'
         set wireless.default_radio1.encryption='psk2'
+        # 优化 WiFi 功率 (尝试设置为 AU 地区以获得更好信号)
+        set wireless.radio0.country='AU'
+        set wireless.radio1.country='AU'
+        
         # 防火墙全开
         set firewall.@zone[1].input='ACCEPT'
         set firewall.@zone[1].forward='REJECT'
+        
         commit network
         commit wireless
         commit firewall
         EOT
+        
+        # 启动 irqbalance
+        /etc/init.d/irqbalance enable
+        /etc/init.d/irqbalance start
+        
         exit 0
         EOF
         
@@ -155,13 +184,15 @@ jobs:
         cd openwrt
         make download -j8 || make download -j1 V=s
 
-    # 5. 单独编译 Sing-Box (必须单线程，否则必炸)
+    # =========================================================
+    # 5. 单独编译 Sing-Box (稳)
+    # =========================================================
     - name: Compile Sing-Box First
       run: |
         cd openwrt
         echo "Compiling Sing-Box (Single Thread)..."
-        # 这里的路径必须精确
-        make package/feeds/passwall_packages/sing-box/compile -j1 V=s || exit 1
+        # 注意：这里的路径改为了 feeds/sbwml，因为我们优先安装了 sbwml 的包
+        make package/feeds/sbwml/sing-box/compile -j1 V=s || exit 1
 
     - name: Compile Firmware
       id: compile
@@ -181,7 +212,7 @@ jobs:
         TIME_TAG=$(date +"%Y%m%d")
         BRANCH="${{ inputs.branch }}"
         [ -z "$BRANCH" ] && BRANCH="23.05"
-        for file in *; do mv "$file" "AX6000_${BRANCH}_${TIME_TAG}_${file}"; done
+        for file in *; do mv "$file" "AX6000_Official_${BRANCH}_${TIME_TAG}_${file}"; done
         echo "FIRMWARE_PATH=$PWD" >> $GITHUB_ENV
         ls -lh
 
